@@ -987,7 +987,7 @@ mod integration {
         if !ok {
             // may lack permissions for fuse
             eprintln!("skip: mount did not appear (permissions?)");
-            let _ = unmount(&mnt);
+            unmount(&mnt);
             let _ = fs::remove_dir_all(&data);
             let _ = fs::remove_dir_all(&mnt);
             return;
@@ -1005,7 +1005,7 @@ mod integration {
         let e = g.get(&DbPath::parse("/d/x").unwrap()).unwrap();
         assert_eq!(e.value, Some(Value::string("world")));
         drop(g);
-        let _ = unmount(&mnt);
+        unmount(&mnt);
         let _ = th.join();
         let _ = fs::remove_dir_all(&data);
         let _ = fs::remove_dir_all(&mnt);

@@ -11,25 +11,22 @@ Canonical design: `docs/superpowers/specs/2026-07-09-alefsdb-design.md`.
 ## Architecture (do not violate)
 
 ```
-CLI / FUSE / Query  →  Namespace  →  Value/codec  →  Storage trait  →  disk
+CLI / bench / FUSE  →  (Unix socket)  →  Daemon dispatch  →  Namespace  →  Storage  →  disk
 ```
 
-- **One store:** FUSE is a projection of Namespace ops. Never write host files under `--data` from the FUSE adapter except via Storage.
-- **Stable traits:** Prefer extending `Storage`, `Value`, `DbPath` over ad-hoc shortcuts.
+- **One store:** FUSE and RPC share one `DbHandle`. Never write host files under `--data` from FUSE except via Storage.
+- **Stable traits:** Prefer extending `Storage`, `Value`, `DbPath`, and the RPC `Request`/`Response` types over ad-hoc shortcuts.
 - **Type-stable FUSE writes:** shell/editor writes must not silently change value types.
 - **Explicit mkdir:** no auto-creating parent directories.
-- **Single-writer v1:** serialize mutations; correctness over parallel write throughput.
+- **Single-writer v1:** serialize mutations through the daemon mutex; correctness over parallel write throughput.
 
 ## Phases
 
 | Phase | Scope |
 | --- | --- |
-| P0 | Workspace, types, codec, paths, Storage trait |
-| P1 | WAL storage, namespace, scalar/dir CLI |
-| P2 | hash / set / list / tree ops |
-| P3 | FUSE mount |
-| P4 | AlefQL |
-| P5 | Compaction, crash tests, export/import, docs |
+| P0–P5 | Types, WAL, namespace, structures, FUSE, AlefQL, compact, export — **landed** |
+| Post-P5 | Daemon socket, FUSE tests, AlefQL golden matrix, soak, bench |
+| P6+ | Secondary indexes, multi-op transaction UX, richer tooling (as needed) |
 
 Do not skip layering to “finish” a later phase.
 
@@ -41,24 +38,24 @@ Do not skip layering to “finish” a later phase.
 | --- | --- |
 | One concern per commit | e.g. “WAL storage”, not “WAL + FUSE + query + CI” |
 | Message = why | Imperative subject; body explains motivation if non-obvious |
-| Buildable steps | Each commit should leave the workspace compiling for crates it touches (`cargo test -p …` or workspace as appropriate) |
+| Buildable steps | Each commit should leave the workspace compiling for crates it touches |
 | Tests with behavior | Behavior change and its tests land together in the same commit |
-| History rewrite | If you already pushed a god commit, split it (soft reset / recommit) and force-push only when the user expects that branch to move |
+| History rewrite | Split god commits when needed; force-push only when expected |
 
-Suggested slice order for stack work: **process/docs → storage → namespace → query → fuse → cli → user docs**.
+Suggested slice order: **process/docs → storage → namespace → query → server/rpc → fuse → cli → bench → user docs**.
 
-Bad: `Implement P1–P5: everything`  
-Good: `Add S1 WAL storage with truncated-tail recovery` then `Add namespace graph for dirs and values` then …
+Bad: `Implement everything remaining`  
+Good: `Add Unix-socket RPC server crate` then `Wire CLI to daemon socket` then …
 
 ## Engineering norms
 
 1. **TDD for behavior** — failing test first for new behavior and bugfixes.
 2. **Small commits** — see above; no phase-spanning dumps.
-3. **`cargo test` green** before push. FUSE integration tests may be ignored when `/dev/fuse` is unavailable.
+3. **`cargo test` green** before push. FUSE integration tests skip when `/dev/fuse` is unavailable.
 4. **YAGNI** — no multi-node, Redis wire protocol, or full POSIX.
-5. **CI is lean** — one workflow: `fmt --check`, `clippy -D warnings`, `cargo test --workspace`. No matrix sprawl, no required FUSE mounts in CI, no deploy noise.
-6. **Push when a coherent slice is ready** so reviewers can see progress outside the container—not only at end of a multi-hour marathon.
-7. **Docs live with behavior** — update design/plan/README when semantics change; document supported FUSE edit paths when touching P3+.
+5. **CI is lean** — one workflow: `fmt --check`, `clippy -D warnings`, `cargo test --workspace`. No matrix sprawl, no required FUSE mounts in CI.
+6. **Push when a coherent slice is ready** so reviewers can see progress outside the container.
+7. **Docs live with behavior** — update README when user-facing semantics change; keep fuse-edit-paths accurate.
 
 ## Crate map
 
@@ -68,8 +65,10 @@ Good: `Add S1 WAL storage with truncated-tail recovery` then `Add namespace grap
 | `alefs-storage` | `Storage`, WAL (S1), compaction (S2), memory (S0) |
 | `alefs-namespace` | path → nodes, structure ops |
 | `alefs-query` | AlefQL parse + evaluate |
-| `alefs-fuse` | FUSE adapter (optional feature / Linux) |
-| `alefsdb` (cli) | user commands |
+| `alefs-server` | Unix-socket protocol, dispatch, client helper |
+| `alefs-fuse` | FUSE adapter (shares `DbHandle` with daemon) |
+| `alefsdb` | user CLI |
+| `alefs-bench` | multi-client SET/GET load generator |
 
 ## Tone
 
