@@ -8,6 +8,7 @@ members = [
     "crates/alefs-fuse",
     "crates/alefs-server",
     "crates/alefsdb",
+    "crates/alefs-bench",
 ]
 
 [workspace.package]

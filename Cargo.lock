@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "alefs-bench"
+version = "0.1.0"
+dependencies = [
+ "alefs-server",
+ "clap",
+]
+
+[[package]]
 name = "alefs-fuse"
 version = "0.1.0"
 dependencies = [

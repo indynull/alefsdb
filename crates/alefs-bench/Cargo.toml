@@ -1,0 +1,15 @@
+[package]
+name = "alefs-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "memtier-style load generator for alefsdb"
+repository.workspace = true
+
+[[bin]]
+name = "alefs-bench"
+path = "src/main.rs"
+
+[dependencies]
+alefs-server = { workspace = true }
+clap = { version = "4", features = ["derive"] }
