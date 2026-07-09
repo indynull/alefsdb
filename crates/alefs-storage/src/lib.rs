@@ -3,6 +3,8 @@
 mod batch;
 mod error;
 mod memory;
+#[cfg(test)]
+mod soak;
 mod wal;
 
 pub use batch::{BatchOp, WriteBatch};
