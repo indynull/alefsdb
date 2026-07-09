@@ -57,6 +57,7 @@ dependencies = [
  "alefs-fuse",
  "alefs-namespace",
  "alefs-query",
+ "alefs-server",
  "alefs-storage",
  "alefs-types",
  "clap",

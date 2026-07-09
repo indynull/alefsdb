@@ -1,11 +1,11 @@
-use alefs_namespace::Database;
-use alefs_query::execute;
-use alefs_storage::WalStorage;
-use alefs_types::{DbPath, Scalar, Value};
+use alefs_server::{
+    default_socket_path, dispatch, open_db, rpc_call, serve_listener, Request, Response,
+};
 use clap::{Parser, Subcommand};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::thread;
 
 #[derive(Parser, Debug)]
 #[command(name = "alefsdb", about = "Typed structure DB + filesystem")]
@@ -16,13 +16,26 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Run the daemon (Unix socket; optional FUSE mount)
+    Serve {
+        #[arg(long)]
+        data: PathBuf,
+        /// Unix socket path (default: <data>/alefs.sock)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Optional FUSE mount point
+        #[arg(long)]
+        mount: Option<PathBuf>,
+    },
     /// Create a directory entry (parents must exist)
     Mkdir {
         #[arg(long)]
         data: PathBuf,
         path: String,
+        /// Force open-local store instead of daemon socket
+        #[arg(long)]
+        direct: bool,
     },
-    /// Set a value at path
     Set {
         #[arg(long)]
         data: PathBuf,
@@ -31,27 +44,31 @@ enum Cmd {
         r#type: String,
         #[arg(long)]
         value: String,
+        #[arg(long)]
+        direct: bool,
     },
-    /// Get a value or directory metadata
     Get {
         #[arg(long)]
         data: PathBuf,
         path: String,
+        #[arg(long)]
+        direct: bool,
     },
-    /// List directory children
     Ls {
         #[arg(long)]
         data: PathBuf,
         #[arg(default_value = "/")]
         path: String,
+        #[arg(long)]
+        direct: bool,
     },
-    /// Delete empty dir or value
     Rm {
         #[arg(long)]
         data: PathBuf,
         path: String,
+        #[arg(long)]
+        direct: bool,
     },
-    /// Hash field set
     Hset {
         #[arg(long)]
         data: PathBuf,
@@ -62,8 +79,9 @@ enum Cmd {
         r#type: String,
         #[arg(long)]
         value: String,
+        #[arg(long)]
+        direct: bool,
     },
-    /// List push
     Lpush {
         #[arg(long)]
         data: PathBuf,
@@ -72,8 +90,9 @@ enum Cmd {
         r#type: String,
         #[arg(long)]
         value: String,
+        #[arg(long)]
+        direct: bool,
     },
-    /// Set add
     Sadd {
         #[arg(long)]
         data: PathBuf,
@@ -82,8 +101,9 @@ enum Cmd {
         r#type: String,
         #[arg(long)]
         value: String,
+        #[arg(long)]
+        direct: bool,
     },
-    /// Tree set (int or string key)
     Tset {
         #[arg(long)]
         data: PathBuf,
@@ -94,75 +114,38 @@ enum Cmd {
         r#type: String,
         #[arg(long)]
         value: String,
+        #[arg(long)]
+        direct: bool,
     },
-    /// Run AlefQL query
     Query {
         #[arg(long)]
         data: PathBuf,
         query: String,
+        #[arg(long)]
+        direct: bool,
     },
-    /// Compact WAL (S2)
     Compact {
         #[arg(long)]
         data: PathBuf,
+        #[arg(long)]
+        direct: bool,
     },
-    /// Export namespace as JSON text
     Export {
         #[arg(long)]
         data: PathBuf,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[arg(long)]
+        direct: bool,
     },
-    /// Import JSON object into namespace
     Import {
         #[arg(long)]
         data: PathBuf,
         #[arg(long)]
         file: PathBuf,
-    },
-    /// Mount database via FUSE (blocking)
-    Serve {
         #[arg(long)]
-        data: PathBuf,
-        #[arg(long)]
-        mount: PathBuf,
+        direct: bool,
     },
-}
-
-fn open_db(data: &PathBuf) -> Result<Database<WalStorage>, String> {
-    let store = WalStorage::open(data).map_err(|e| e.to_string())?;
-    Database::open(store).map_err(|e| e.to_string())
-}
-
-fn parse_value(ty: &str, raw: &str) -> Result<Value, String> {
-    match ty {
-        "null" => Ok(Value::null()),
-        "bool" => Ok(Value::bool(raw.parse().map_err(|e| format!("{e}"))?)),
-        "int" => Ok(Value::int(raw.parse().map_err(|e| format!("{e}"))?)),
-        "float" => Ok(Value::float(raw.parse().map_err(|e| format!("{e}"))?)),
-        "string" => Ok(Value::string(raw)),
-        "bytes" => Ok(Value::bytes(raw.as_bytes().to_vec())),
-        "hash" => Ok(Value::Hash(BTreeMap::new())),
-        "list" => Ok(Value::List(Vec::new())),
-        "set" => Ok(Value::Set(Vec::new())),
-        "tree" => Ok(Value::Tree(BTreeMap::new())),
-        other => Err(format!("unknown type {other}")),
-    }
-}
-
-fn format_value(v: &Value) -> String {
-    match v {
-        Value::Scalar(Scalar::Null) => "null".into(),
-        Value::Scalar(Scalar::Bool(b)) => b.to_string(),
-        Value::Scalar(Scalar::Int(n)) => n.to_string(),
-        Value::Scalar(Scalar::Float(bits)) => f64::from_bits(*bits).to_string(),
-        Value::Scalar(Scalar::String(s)) => s.clone(),
-        Value::Scalar(Scalar::Bytes(b)) => format!("bytes[{}]", b.len()),
-        Value::Hash(m) => format!("hash({{{}}})", m.len()),
-        Value::Set(m) => format!("set({})", m.len()),
-        Value::List(m) => format!("list[{}]", m.len()),
-        Value::Tree(m) => format!("tree({{{}}})", m.len()),
-    }
 }
 
 fn main() -> ExitCode {
@@ -176,143 +159,176 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), String> {
     match cli.cmd {
-        Cmd::Mkdir { data, path } => {
-            let mut db = open_db(&data)?;
-            let p = DbPath::parse(&path).map_err(|e| e.to_string())?;
-            db.mkdir(&p).map_err(|e| e.to_string())?;
-            println!("ok {}", p.as_str());
+        Cmd::Serve {
+            data,
+            socket,
+            mount,
+        } => {
+            let sock = socket.unwrap_or_else(|| default_socket_path(&data));
+            let db = open_db(&data).map_err(|e| e.to_string())?;
+            if let Some(mnt) = mount {
+                let db_fuse = Arc::clone(&db);
+                let mnt_c = mnt.clone();
+                thread::spawn(move || {
+                    if let Err(e) = alefs_fuse::mount_shared(db_fuse, &mnt_c) {
+                        eprintln!("fuse error: {e}");
+                    }
+                });
+                eprintln!("fuse mounting at {}", mnt.display());
+            }
+            serve_listener(db, sock).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        Cmd::Mkdir { data, path, direct } => {
+            print_resp(call(&data, direct, Request::Mkdir { path })?)
         }
         Cmd::Set {
             data,
             path,
             r#type,
             value,
-        } => {
-            let mut db = open_db(&data)?;
-            let p = DbPath::parse(&path).map_err(|e| e.to_string())?;
-            let v = parse_value(&r#type, &value)?;
-            db.set(&p, v).map_err(|e| e.to_string())?;
-            println!("ok {}", p.as_str());
-        }
-        Cmd::Get { data, path } => {
-            let db = open_db(&data)?;
-            let p = DbPath::parse(&path).map_err(|e| e.to_string())?;
-            let e = db.get(&p).map_err(|e| e.to_string())?;
-            match e.kind {
-                alefs_namespace::EntryKind::Directory => println!("directory {}", p.as_str()),
-                alefs_namespace::EntryKind::Value => {
-                    let v = e.value.unwrap();
-                    println!("{} {}", v.typename(), format_value(&v));
-                }
-            }
-        }
-        Cmd::Ls { data, path } => {
-            let db = open_db(&data)?;
-            let p = DbPath::parse(&path).map_err(|e| e.to_string())?;
-            for (name, kind) in db.list(&p).map_err(|e| e.to_string())? {
-                let tag = match kind {
-                    alefs_namespace::EntryKind::Directory => "dir",
-                    alefs_namespace::EntryKind::Value => "val",
-                };
-                println!("{tag}\t{name}");
-            }
-        }
-        Cmd::Rm { data, path } => {
-            let mut db = open_db(&data)?;
-            let p = DbPath::parse(&path).map_err(|e| e.to_string())?;
-            db.delete(&p).map_err(|e| e.to_string())?;
-            println!("ok {}", p.as_str());
-        }
+            direct,
+        } => print_resp(call(
+            &data,
+            direct,
+            Request::Set {
+                path,
+                type_name: r#type,
+                value,
+            },
+        )?),
+        Cmd::Get { data, path, direct } => print_resp(call(&data, direct, Request::Get { path })?),
+        Cmd::Ls { data, path, direct } => print_resp(call(&data, direct, Request::Ls { path })?),
+        Cmd::Rm { data, path, direct } => print_resp(call(&data, direct, Request::Rm { path })?),
         Cmd::Hset {
             data,
             path,
             key,
             r#type,
             value,
-        } => {
-            let mut db = open_db(&data)?;
-            let p = DbPath::parse(&path).map_err(|e| e.to_string())?;
-            let v = parse_value(&r#type, &value)?;
-            db.hash_set(&p, &key, v).map_err(|e| e.to_string())?;
-            println!("ok");
-        }
+            direct,
+        } => print_resp(call(
+            &data,
+            direct,
+            Request::Hset {
+                path,
+                key,
+                type_name: r#type,
+                value,
+            },
+        )?),
         Cmd::Lpush {
             data,
             path,
             r#type,
             value,
-        } => {
-            let mut db = open_db(&data)?;
-            let p = DbPath::parse(&path).map_err(|e| e.to_string())?;
-            let v = parse_value(&r#type, &value)?;
-            db.list_push(&p, v).map_err(|e| e.to_string())?;
-            println!("ok");
-        }
+            direct,
+        } => print_resp(call(
+            &data,
+            direct,
+            Request::Lpush {
+                path,
+                type_name: r#type,
+                value,
+            },
+        )?),
         Cmd::Sadd {
             data,
             path,
             r#type,
             value,
-        } => {
-            let mut db = open_db(&data)?;
-            let p = DbPath::parse(&path).map_err(|e| e.to_string())?;
-            let v = parse_value(&r#type, &value)?;
-            db.set_add(&p, v).map_err(|e| e.to_string())?;
-            println!("ok");
-        }
+            direct,
+        } => print_resp(call(
+            &data,
+            direct,
+            Request::Sadd {
+                path,
+                type_name: r#type,
+                value,
+            },
+        )?),
         Cmd::Tset {
             data,
             path,
             key,
             r#type,
             value,
-        } => {
-            let mut db = open_db(&data)?;
-            let p = DbPath::parse(&path).map_err(|e| e.to_string())?;
-            let sk = if let Ok(n) = key.parse::<i64>() {
-                Scalar::Int(n)
-            } else {
-                Scalar::String(key)
-            };
-            let v = parse_value(&r#type, &value)?;
-            db.tree_set(&p, sk, v).map_err(|e| e.to_string())?;
-            println!("ok");
-        }
-        Cmd::Query { data, query } => {
-            let db = open_db(&data)?;
-            let hits = execute(&db, &query).map_err(|e| e.to_string())?;
-            for h in hits {
-                println!("{}\t{}", h.path.as_str(), h.type_name);
+            direct,
+        } => print_resp(call(
+            &data,
+            direct,
+            Request::Tset {
+                path,
+                key,
+                type_name: r#type,
+                value,
+            },
+        )?),
+        Cmd::Query {
+            data,
+            query,
+            direct,
+        } => print_resp(call(&data, direct, Request::Query { query })?),
+        Cmd::Compact { data, direct } => print_resp(call(&data, direct, Request::Compact)?),
+        Cmd::Export { data, out, direct } => {
+            let resp = call(&data, direct, Request::Export)?;
+            match resp {
+                Response::Export { json } => {
+                    if let Some(path) = out {
+                        std::fs::write(path, json).map_err(|e| e.to_string())?;
+                    } else {
+                        println!("{json}");
+                    }
+                    Ok(())
+                }
+                Response::Err { message } => Err(message),
+                other => Err(format!("unexpected response: {other:?}")),
             }
         }
-        Cmd::Compact { data } => {
-            let mut store = WalStorage::open(&data).map_err(|e| e.to_string())?;
-            store.compact().map_err(|e| e.to_string())?;
-            println!("ok compacted");
-        }
-        Cmd::Export { data, out } => {
-            let db = open_db(&data)?;
-            let json = db.export_json().map_err(|e| e.to_string())?;
-            if let Some(path) = out {
-                std::fs::write(path, json).map_err(|e| e.to_string())?;
-            } else {
-                println!("{json}");
-            }
-        }
-        Cmd::Import { data, file } => {
-            let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
-            let mut db = open_db(&data)?;
-            db.import_json(&text).map_err(|e| e.to_string())?;
-            println!("ok imported");
-        }
-        Cmd::Serve { data, mount } => {
-            println!(
-                "mounting {} at {} (ctrl-c to stop)",
-                data.display(),
-                mount.display()
-            );
-            alefs_fuse::mount(&data, &mount)?;
+        Cmd::Import { data, file, direct } => {
+            let json = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+            print_resp(call(&data, direct, Request::Import { json })?)
         }
     }
-    Ok(())
+}
+
+/// Prefer daemon socket when present; otherwise open the store directly.
+fn call(data: &PathBuf, direct: bool, req: Request) -> Result<Response, String> {
+    let sock = default_socket_path(data);
+    if !direct && sock.exists() {
+        return rpc_call(&sock, req).map_err(|e| e.to_string());
+    }
+    // Direct path: open, dispatch once, drop.
+    let db = open_db(data).map_err(|e| e.to_string())?;
+    Ok(dispatch(&db, req))
+}
+
+fn print_resp(resp: Response) -> Result<(), String> {
+    match resp {
+        Response::Ok { message } => {
+            println!("{message}");
+            Ok(())
+        }
+        Response::Value { type_name, display } => {
+            println!("{type_name} {display}");
+            Ok(())
+        }
+        Response::List { entries } => {
+            for e in entries {
+                println!("{}\t{}", e.kind, e.name);
+            }
+            Ok(())
+        }
+        Response::Query { hits } => {
+            for h in hits {
+                println!("{}\t{}", h.path, h.type_name);
+            }
+            Ok(())
+        }
+        Response::Export { json } => {
+            println!("{json}");
+            Ok(())
+        }
+        Response::Err { message } => Err(message),
+    }
 }

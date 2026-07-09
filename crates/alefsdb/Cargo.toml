@@ -16,4 +16,5 @@ alefs-storage = { workspace = true }
 alefs-namespace = { workspace = true }
 alefs-query = { workspace = true }
 alefs-fuse = { workspace = true }
+alefs-server = { workspace = true }
 clap = { version = "4", features = ["derive"] }

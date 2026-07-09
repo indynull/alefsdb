@@ -27,9 +27,14 @@ pub fn open_shared(data_dir: impl AsRef<Path>) -> Result<SharedDb, String> {
     Ok(Arc::new(Mutex::new(db)))
 }
 
-/// Mount `data_dir` database at `mountpoint` (blocking).
+/// Mount `data_dir` database at `mountpoint` (blocking). Opens its own store handle.
 pub fn mount(data_dir: impl AsRef<Path>, mountpoint: impl AsRef<Path>) -> Result<(), String> {
     let db = open_shared(data_dir)?;
+    mount_shared(db, mountpoint)
+}
+
+/// Mount an already-open shared database (for daemon + FUSE in one process).
+pub fn mount_shared(db: SharedDb, mountpoint: impl AsRef<Path>) -> Result<(), String> {
     let fs = AlefsFs::new(db);
     let opts = vec![
         MountOption::FSName("alefsdb".into()),
