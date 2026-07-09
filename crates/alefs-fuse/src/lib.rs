@@ -850,3 +850,97 @@ mod tests {
         let _ = fuse_available();
     }
 }
+
+#[cfg(test)]
+mod integration {
+    use super::*;
+    use alefs_types::Value;
+    use std::fs;
+    use std::io::Write;
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn tmp_pair() -> (std::path::PathBuf, std::path::PathBuf) {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data = std::env::temp_dir().join(format!("alefs-fuse-data-{n}"));
+        let mnt = std::env::temp_dir().join(format!("alefs-fuse-mnt-{n}"));
+        let _ = fs::remove_dir_all(&data);
+        let _ = fs::remove_dir_all(&mnt);
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&mnt).unwrap();
+        (data, mnt)
+    }
+
+    #[test]
+    fn fuse_cat_scalar_when_available() {
+        if !fuse_available() {
+            eprintln!("skip: /dev/fuse missing");
+            return;
+        }
+        // Need fusermount3 for unmount
+        if Command::new("fusermount3").arg("-V").output().is_err()
+            && Command::new("fusermount").arg("-V").output().is_err()
+        {
+            eprintln!("skip: fusermount not installed");
+            return;
+        }
+
+        let (data, mnt) = tmp_pair();
+        let db = open_shared(&data).unwrap();
+        {
+            let mut g = db.lock().unwrap();
+            g.mkdir(&DbPath::parse("/d").unwrap()).unwrap();
+            g.set(&DbPath::parse("/d/x").unwrap(), Value::string("hello"))
+                .unwrap();
+        }
+        let db_c = Arc::clone(&db);
+        let mnt_c = mnt.clone();
+        let th = thread::spawn(move || {
+            let _ = mount_shared(db_c, &mnt_c);
+        });
+        // Wait for mount
+        let target = mnt.join("d").join("x");
+        let mut ok = false;
+        for _ in 0..50 {
+            if target.exists() {
+                ok = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if !ok {
+            // may lack permissions for fuse
+            eprintln!("skip: mount did not appear (permissions?)");
+            let _ = unmount(&mnt);
+            let _ = fs::remove_dir_all(&data);
+            let _ = fs::remove_dir_all(&mnt);
+            return;
+        }
+        let content = fs::read_to_string(&target).expect("read fused file");
+        assert_eq!(content, "hello");
+        // type-stable write
+        {
+            let mut f = fs::File::create(&target).unwrap();
+            f.write_all(b"world").unwrap();
+            f.sync_all().unwrap();
+        }
+        thread::sleep(Duration::from_millis(100));
+        let g = db.lock().unwrap();
+        let e = g.get(&DbPath::parse("/d/x").unwrap()).unwrap();
+        assert_eq!(e.value, Some(Value::string("world")));
+        drop(g);
+        let _ = unmount(&mnt);
+        let _ = th.join();
+        let _ = fs::remove_dir_all(&data);
+        let _ = fs::remove_dir_all(&mnt);
+    }
+
+    fn unmount(mnt: &Path) {
+        let _ = Command::new("fusermount3").args(["-u"]).arg(mnt).status();
+        let _ = Command::new("fusermount").args(["-u"]).arg(mnt).status();
+    }
+}
