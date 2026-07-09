@@ -1,0 +1,14 @@
+[package]
+name = "alefs-fuse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FUSE adapter for alefsdb"
+repository.workspace = true
+
+[dependencies]
+alefs-types = { workspace = true }
+alefs-namespace = { workspace = true }
+alefs-storage = { workspace = true }
+fuser = "0.15"
+libc = "0.2"

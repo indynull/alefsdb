@@ -5,6 +5,7 @@ members = [
     "crates/alefs-storage",
     "crates/alefs-namespace",
     "crates/alefs-query",
+    "crates/alefs-fuse",
 ]
 
 [workspace.package]
@@ -18,3 +19,4 @@ alefs-types = { path = "crates/alefs-types" }
 alefs-storage = { path = "crates/alefs-storage" }
 alefs-namespace = { path = "crates/alefs-namespace" }
 alefs-query = { path = "crates/alefs-query" }
+alefs-fuse = { path = "crates/alefs-fuse" }
