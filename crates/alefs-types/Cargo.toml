@@ -1,0 +1,9 @@
+[package]
+name = "alefs-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Value algebra, canonical codec, and path types for alefsdb"
+repository.workspace = true
+
+[dependencies]

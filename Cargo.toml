@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/alefs-types",
+    "crates/alefs-storage",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/indynull/alefsdb"
+
+[workspace.dependencies]
+alefs-types = { path = "crates/alefs-types" }
+alefs-storage = { path = "crates/alefs-storage" }
