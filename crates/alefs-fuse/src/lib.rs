@@ -483,10 +483,6 @@ impl Filesystem for AlefsFs {
         size: u32,
         reply: ReplyXattr,
     ) {
-        if name != OsStr::new("user.alefs.type") {
-            reply.error(libc::ENODATA);
-            return;
-        }
         let Some(path_str) = self.path_for_ino(ino) else {
             reply.error(libc::ENOENT);
             return;
@@ -499,12 +495,62 @@ impl Filesystem for AlefsFs {
                 return;
             }
         };
-        let val = if let Ok(entry) = db.get(&path) {
-            type_xattr(entry.value.as_ref(), entry.kind)
+
+        let val = if name == OsStr::new("user.alefs.type") {
+            if let Ok(entry) = db.get(&path) {
+                type_xattr(entry.value.as_ref(), entry.kind)
+            } else if let Some(parent) = path.parent() {
+                // projected structure child: type of projected value
+                if let Ok(entry) = db.get(&parent) {
+                    if let Some(ref v) = entry.value {
+                        let child = path.segments().last().map(|s| s.as_str()).unwrap_or("");
+                        if let Some(cv) = project_child_value(v, child) {
+                            type_xattr(Some(&cv), EntryKind::Value)
+                        } else {
+                            reply.error(libc::ENOENT);
+                            return;
+                        }
+                    } else {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                } else {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            } else {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        } else if name == OsStr::new("user.alefs.member") {
+            // Display hint for set members named by content hash.
+            if let Some(parent) = path.parent() {
+                if let Ok(entry) = db.get(&parent) {
+                    if let Some(Value::Set(members)) = entry.value {
+                        let child = path.segments().last().map(|s| s.as_str()).unwrap_or("");
+                        if let Some(m) = members.iter().find(|m| set_member_name(m) == child) {
+                            format_member_hint(m)
+                        } else {
+                            reply.error(libc::ENODATA);
+                            return;
+                        }
+                    } else {
+                        reply.error(libc::ENODATA);
+                        return;
+                    }
+                } else {
+                    reply.error(libc::ENODATA);
+                    return;
+                }
+            } else {
+                reply.error(libc::ENODATA);
+                return;
+            }
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(libc::ENODATA);
             return;
         };
+
         let bytes = val.as_bytes();
         if size == 0 {
             reply.size(bytes.len() as u32);
@@ -513,6 +559,20 @@ impl Filesystem for AlefsFs {
         } else {
             reply.data(bytes);
         }
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        _parent: u64,
+        _name: &OsStr,
+        _newparent: u64,
+        _newname: &OsStr,
+        _flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        // Editor temp-file rename workflows are intentionally unsupported in v1.
+        reply.error(libc::ENOTSUP);
     }
 
     fn mkdir(
@@ -762,6 +822,18 @@ fn set_member_name(v: &Value) -> String {
     let mut h = DefaultHasher::new();
     enc.hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+fn format_member_hint(v: &Value) -> String {
+    match v {
+        Value::Scalar(Scalar::String(s)) => s.clone(),
+        Value::Scalar(Scalar::Int(n)) => n.to_string(),
+        Value::Scalar(Scalar::Bool(b)) => b.to_string(),
+        Value::Scalar(Scalar::Null) => "null".into(),
+        Value::Scalar(Scalar::Float(bits)) => f64::from_bits(*bits).to_string(),
+        Value::Scalar(Scalar::Bytes(b)) => format!("bytes[{}]", b.len()),
+        other => format!("<{}>", other.typename()),
+    }
 }
 
 fn project_child_attr(val: &Value, name: &str) -> Option<FileAttr> {
