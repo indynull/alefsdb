@@ -1,0 +1,11 @@
+[package]
+name = "alefs-namespace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Path namespace and structure operations for alefsdb"
+repository.workspace = true
+
+[dependencies]
+alefs-types = { workspace = true }
+alefs-storage = { workspace = true }

@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "alefs-namespace"
+version = "0.1.0"
+dependencies = [
+ "alefs-storage",
+ "alefs-types",
+]
+
+[[package]]
 name = "alefs-storage"
 version = "0.1.0"
 

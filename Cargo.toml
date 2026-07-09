@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/alefs-types",
     "crates/alefs-storage",
+    "crates/alefs-namespace",
 ]
 
 [workspace.package]
@@ -14,3 +15,4 @@ repository = "https://github.com/indynull/alefsdb"
 [workspace.dependencies]
 alefs-types = { path = "crates/alefs-types" }
 alefs-storage = { path = "crates/alefs-storage" }
+alefs-namespace = { path = "crates/alefs-namespace" }
