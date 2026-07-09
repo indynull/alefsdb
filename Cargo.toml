@@ -6,6 +6,7 @@ members = [
     "crates/alefs-namespace",
     "crates/alefs-query",
     "crates/alefs-fuse",
+    "crates/alefsdb",
 ]
 
 [workspace.package]

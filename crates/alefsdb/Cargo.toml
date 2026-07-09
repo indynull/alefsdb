@@ -1,0 +1,19 @@
+[package]
+name = "alefsdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for alefsdb"
+repository.workspace = true
+
+[[bin]]
+name = "alefsdb"
+path = "src/main.rs"
+
+[dependencies]
+alefs-types = { workspace = true }
+alefs-storage = { workspace = true }
+alefs-namespace = { workspace = true }
+alefs-query = { workspace = true }
+alefs-fuse = { workspace = true }
+clap = { version = "4", features = ["derive"] }
