@@ -72,11 +72,7 @@ pub fn serve_listener(db: DbHandle, socket_path: impl AsRef<Path>) -> Result<(),
 }
 
 fn handle_connection(db: DbHandle, mut stream: UnixStream) -> Result<(), ServeError> {
-    loop {
-        let req = match read_message(&mut stream)? {
-            Some(bytes) => bytes,
-            None => break,
-        };
+    while let Some(req) = read_message(&mut stream)? {
         let request: Request = match serde_json::from_slice(&req) {
             Ok(r) => r,
             Err(e) => {
