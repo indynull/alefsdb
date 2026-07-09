@@ -4,6 +4,7 @@ members = [
     "crates/alefs-types",
     "crates/alefs-storage",
     "crates/alefs-namespace",
+    "crates/alefs-query",
 ]
 
 [workspace.package]
@@ -16,3 +17,4 @@ repository = "https://github.com/indynull/alefsdb"
 alefs-types = { path = "crates/alefs-types" }
 alefs-storage = { path = "crates/alefs-storage" }
 alefs-namespace = { path = "crates/alefs-namespace" }
+alefs-query = { path = "crates/alefs-query" }

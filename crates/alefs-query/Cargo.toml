@@ -1,0 +1,12 @@
+[package]
+name = "alefs-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AlefQL parser and evaluator for alefsdb"
+repository.workspace = true
+
+[dependencies]
+alefs-types = { workspace = true }
+alefs-namespace = { workspace = true }
+alefs-storage = { workspace = true }

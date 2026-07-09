@@ -11,6 +11,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "alefs-query"
+version = "0.1.0"
+dependencies = [
+ "alefs-namespace",
+ "alefs-storage",
+ "alefs-types",
+]
+
+[[package]]
 name = "alefs-storage"
 version = "0.1.0"
 
