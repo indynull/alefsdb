@@ -1,0 +1,15 @@
+[package]
+name = "alefs-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unix-socket daemon and RPC for alefsdb"
+repository.workspace = true
+
+[dependencies]
+alefs-types = { workspace = true }
+alefs-storage = { workspace = true }
+alefs-namespace = { workspace = true }
+alefs-query = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

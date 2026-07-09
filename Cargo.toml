@@ -6,6 +6,7 @@ members = [
     "crates/alefs-namespace",
     "crates/alefs-query",
     "crates/alefs-fuse",
+    "crates/alefs-server",
     "crates/alefsdb",
 ]
 
@@ -21,3 +22,4 @@ alefs-storage = { path = "crates/alefs-storage" }
 alefs-namespace = { path = "crates/alefs-namespace" }
 alefs-query = { path = "crates/alefs-query" }
 alefs-fuse = { path = "crates/alefs-fuse" }
+alefs-server = { path = "crates/alefs-server" }
