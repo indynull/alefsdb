@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::{WalStorage, WriteBatch, Storage};
+    use crate::{Storage, WalStorage, WriteBatch};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,18 +39,12 @@ mod tests {
             let wal_after = fs::metadata(dir.join("wal.log")).unwrap().len();
             assert_eq!(wal_after, 0, "WAL truncated after compact");
             assert!(dir.join("checkpoint.bin").exists());
-            assert_eq!(
-                s.get(b"k1999").unwrap().as_deref(),
-                Some(b"v1999".as_ref())
-            );
+            assert_eq!(s.get(b"k1999").unwrap().as_deref(), Some(b"v1999".as_ref()));
         }
         // reopen
         let s = WalStorage::open(&dir).unwrap();
         assert_eq!(s.get(b"k0").unwrap().as_deref(), Some(b"v0".as_ref()));
-        assert_eq!(
-            s.get(b"k1999").unwrap().as_deref(),
-            Some(b"v1999".as_ref())
-        );
+        assert_eq!(s.get(b"k1999").unwrap().as_deref(), Some(b"v1999".as_ref()));
         let _ = fs::remove_dir_all(&dir);
     }
 
