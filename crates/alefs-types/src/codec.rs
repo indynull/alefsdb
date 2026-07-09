@@ -91,10 +91,8 @@ fn encode_value(value: &Value, out: &mut Vec<u8>) {
         }
         Value::Set(members) => {
             // Canonical: unique members sorted by payload encoding.
-            let mut encoded: Vec<(Vec<u8>, &Value)> = members
-                .iter()
-                .map(|m| (encode_payload(m), m))
-                .collect();
+            let mut encoded: Vec<(Vec<u8>, &Value)> =
+                members.iter().map(|m| (encode_payload(m), m)).collect();
             encoded.sort_by(|a, b| a.0.cmp(&b.0));
             encoded.dedup_by(|a, b| a.0 == b.0);
             out.push(TAG_SET);

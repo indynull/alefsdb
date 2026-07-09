@@ -22,7 +22,10 @@ impl std::fmt::Display for PathError {
             PathError::NotAbsolute => write!(f, "path must be absolute (start with /)"),
             PathError::EmptySegment => write!(f, "path contains an empty segment"),
             PathError::ForbiddenSegment(s) => {
-                write!(f, "path segment '{s}' is forbidden (. and .. are not stored)")
+                write!(
+                    f,
+                    "path segment '{s}' is forbidden (. and .. are not stored)"
+                )
             }
             PathError::InvalidUtf8 => write!(f, "path is not valid UTF-8"),
         }
