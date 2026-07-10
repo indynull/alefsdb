@@ -1,190 +1,147 @@
 # alefsdb
 
-**alefsdb** is a local, research-oriented database of typed values arranged in a path hierarchy. The same data is available through a CLI (and library crates), a **Unix-socket daemon**, and a Linux **FUSE** mount. Search uses a small structured language, **AlefQL**.
+**alefsdb** is a local, production-oriented **typed structure database** with:
 
-It prioritizes clear layering and testable semantics over production features such as clustering or multi-tenant ops.
+- hierarchical paths and typed values (scalars, hash, list, set, tree)
+- durable WAL storage with compaction
+- a **Unix-socket daemon** (single writer, concurrent connections)
+- optional **FUSE** mount sharing the same open store
+- **AlefQL** search with type secondary indexes
+- **atomic multi-op transactions**
+- **alefs-bench** multi-client load generator
 
-## Features
-
-- **Typed values** at paths: scalars (`null`, `bool`, `int`, `float`, `string`, `bytes`) and structures (`hash`, `list`, `set`, `tree`)
-- **Durable single-node storage**: write-ahead log with fsync on commit; optional compaction to bound WAL growth
-- **Single-writer daemon** on a Unix socket (`<data>/alefs.sock`) so CLI and FUSE share one open store
-- **Explicit namespace**: directories and values share one path tree; parents must exist before children (no auto-`mkdir`)
-- **FUSE projection**: browse and edit with normal tools; type metadata via `user.alefs.type`
-- **AlefQL**: path/type/structure predicates with `AND` / `OR` / `NOT`
-- **Export / import** of the namespace as JSON
-- **Load generator** (`alefs-bench`) for multi-client SET/GET mixes (memtier-style)
+Not a distributed system: no replication, sharding, or multi-tenant ACLs.
 
 ## Requirements
 
-- Rust stable (edition 2021)
-- Linux for FUSE mount (`libfuse3` headers to **build**; `fuse3` to mount)
+- Rust stable (2021)
+- Linux for FUSE (`libfuse3-dev`, `fuse3`)
 
 ```bash
-# Debian / Ubuntu
 sudo apt-get install -y libfuse3-dev pkg-config fuse3
+cargo test --workspace
+cargo build --release -p alefsdb -p alefs-bench
 ```
 
-## Build and test
+## Operations runbook
+
+### Start the daemon
 
 ```bash
-cargo test --workspace
-cargo build -p alefsdb -p alefs-bench
+DATA=./data
+mkdir -p "$DATA" /tmp/alefs-mnt
+RUST_LOG=info alefsdb serve --data "$DATA" --mount /tmp/alefs-mnt
 ```
 
-CI runs `cargo fmt --check`, `clippy -D warnings`, and `cargo test --workspace`. FUSE mounts are optional in tests (skipped without `/dev/fuse`).
+- Listens on `$DATA/alefs.sock`
+- Takes an exclusive flock on `$DATA/LOCK` (second `serve` fails immediately)
+- SIGINT / SIGTERM: stop accept loop, remove socket, release lock
+- Optional FUSE mount uses the **same** `DbHandle` as RPC
 
-Soak helper (many writes + compact):
+### CLI (prefers daemon socket)
+
+```bash
+alefsdb mkdir --data "$DATA" /users
+alefsdb set --data "$DATA" /users/name --type string --value alice
+alefsdb get --data "$DATA" /users/name
+alefsdb query --data "$DATA" 'type string AND path /users/*'
+alefsdb stats --data "$DATA"
+alefsdb compact --data "$DATA"
+```
+
+Use `--direct` to open the store in-process (ignores socket). Prefer the daemon under load or with FUSE.
+
+### Atomic transactions
+
+Write a JSON array of RPC ops to a file:
+
+```json
+[
+  {"op": "mkdir", "path": "/acct"},
+  {"op": "set", "path": "/acct/balance", "type": "int", "value": "100"},
+  {"op": "hset", "path": "/acct/meta", "key": "currency", "type": "string", "value": "USD"}
+]
+```
+
+```bash
+alefsdb txn --data "$DATA" --file ops.json
+```
+
+All ops share one WAL commit; failure applies nothing.
+
+### Benchmark
+
+```bash
+alefsdb serve --data ./data &
+alefs-bench --data ./data --clients 8 --requests 50000 --ratio 1:10 --keyspace 5000
+```
+
+Workers keep a **persistent socket client**. Output includes ops/sec and p50/p95/p99 latency.
+
+Soak (WAL growth + compact):
 
 ```bash
 ./scripts/load_compact.sh 500
 ```
 
-## Quick start
-
-### Direct mode (no daemon)
-
-```bash
-DATA=./data
-alefsdb mkdir --data "$DATA" --direct /users
-alefsdb set --data "$DATA" --direct /users/name --type string --value alice
-alefsdb get --data "$DATA" --direct /users/name
-```
-
-### Daemon mode (recommended when using FUSE or many clients)
-
-```bash
-DATA=./data
-mkdir -p "$DATA" /tmp/alefs-mnt
-
-# Terminal 1: socket + optional FUSE on the same DbHandle
-alefsdb serve --data "$DATA" --mount /tmp/alefs-mnt
-
-# Terminal 2: CLI uses <data>/alefs.sock automatically
-alefsdb mkdir --data "$DATA" /users
-alefsdb set --data "$DATA" /users/name --type string --value alice
-alefsdb query --data "$DATA" 'type string AND path /users/*'
-alefsdb compact --data "$DATA"
-
-# Filesystem view
-ls /tmp/alefs-mnt/users
-cat /tmp/alefs-mnt/users/name
-```
-
-Pass `--direct` on any command to open the store in-process and ignore the socket.
-
-### Benchmark (memtier-style)
-
-```bash
-# Against a running daemon
-alefsdb serve --data ./data &
-alefs-bench --data ./data --clients 8 --requests 50000 --ratio 1:10 --keyspace 5000
-
-# Or open-local (slower; re-opens store per op)
-alefs-bench --data ./data --direct --clients 4 --requests 10000
-```
-
-Reports throughput (ops/sec) and latency percentiles (p50/p95/p99).
-
 ## Data model
 
-### Paths
-
-- Absolute only: `/`, `/a/b`
-- No `.`, `..`, or empty segments in stored paths
-- A path is either a **directory** or a **value**, never both
-- Creating `/a/b` requires `/a` (or root) to already exist as a directory
-
-### Values
-
-| Kind | Meaning |
+| Concept | Rules |
 | --- | --- |
-| Scalar | `null`, `bool`, `int`, `float`, `string`, `bytes` |
-| Hash | String keys → nested values |
-| List | Ordered sequence, indexable as `0`, `1`, … |
-| Set | Unique members by **canonical encoding** |
-| Tree | Ordered map with scalar keys |
-
-Equality and set membership use a versioned **canonical binary encoding**. Floats compare by bit pattern.
-
-### On-disk layout (`--data`)
-
-| File | Role |
-| --- | --- |
-| `wal.log` | Append-only commit log |
-| `checkpoint.bin` | Optional compacted snapshot |
-| `alefs.sock` | Daemon Unix socket (while `serve` is running) |
-
-Commits are durable after WAL `fdatasync`. A truncated final WAL record is dropped on open; prior commits remain.
-
-## CLI reference
-
-| Command | Purpose |
-| --- | --- |
-| `serve --data DIR [--mount PATH] [--socket PATH]` | Daemon: RPC socket (+ optional FUSE) |
-| `mkdir / set / get / ls / rm` | Namespace basics |
-| `hset` / `lpush` / `sadd` / `tset` | Structure helpers |
-| `query '…'` | AlefQL (read-only) |
-| `compact` | Checkpoint live state and truncate WAL |
-| `export` / `import` | JSON dump / load |
-| `--direct` | Skip socket; open store in this process |
+| Paths | Absolute `/a/b`; no `.` / `..` / empty segments; explicit mkdir |
+| Values | scalar / hash / list / set / tree; equality via canonical encoding |
+| On disk | `wal.log`, `checkpoint.bin`, `LOCK`, `alefs.sock` (while serving) |
+| Indexes | `idx/t/<type>/<id>` for type-filtered queries |
 
 ## AlefQL
 
-Queries return matching paths and type names. Empty results are success; syntax errors fail the process.
+`NOT` tightest; `AND`/`OR` left-associative equal precedence. Wrong-type predicates → no match.
 
-**Composition:** `NOT` binds tightest; `AND` and `OR` are left-associative with equal precedence.
+```text
+path /users/** AND type hash AND has "email"
+type set AND contains "admin" AND size > 0
+```
 
-| Predicate | Example |
+Concrete `type` predicates use the secondary type index for candidate selection.
+
+## FUSE
+
+| DB | FS |
 | --- | --- |
-| `path` | `path /users/**` |
-| `type` | `type hash` (also `scalar`, `int`, …) |
-| `name` | `name "*.tmp"` |
-| `value` | `value = 3` |
-| `has` | `has "email"` |
-| `contains` | `contains "admin"` |
-| `at` | `at 0 = "login"` |
-| `key` | `key >= 10` |
-| `size` | `size > 0` |
+| Scalar | file (type-stable writes) |
+| Structures | projected directories |
+| Type | `user.alefs.type` |
+| Set members | hash names + `user.alefs.member` |
+| Rename | `ENOTSUP` |
 
-Wrong-type predicates do not match (they do not error).
-
-## FUSE mount
-
-| DB | Filesystem |
-| --- | --- |
-| Directory | Directory |
-| Scalar | Regular file |
-| Hash / list / set / tree | Directory of projected children |
-| Type | `user.alefs.type` xattr |
-| Set member display | `user.alefs.member` xattr |
-
-Rename is `ENOTSUP` (blocks common editor temp-file workflows). Details: [docs/fuse-edit-paths.md](docs/fuse-edit-paths.md).
+See [docs/fuse-edit-paths.md](docs/fuse-edit-paths.md).
 
 ## Architecture
 
 ```
-CLI / bench  ──┐
-               ├── Unix socket ──► Daemon (single writer) ──► Namespace ──► Storage
-FUSE mount  ───┘                        │
-                                        └── same DbHandle
+CLI / bench ──┐
+              ├── Unix socket ──► Daemon (flock, stats, concurrent accept)
+FUSE ─────────┘                        │
+                                       ▼
+                              Mutex<Database>  →  Namespace + indexes  →  WAL
 ```
 
 | Crate | Role |
 | --- | --- |
-| `alefs-types` | `Value`, canonical encode/decode, `DbPath` |
-| `alefs-storage` | `Storage` trait; memory; WAL + compaction |
-| `alefs-namespace` | Path graph, structure helpers, export/import |
-| `alefs-query` | AlefQL parse + evaluate |
-| `alefs-server` | Unix-socket RPC + dispatch |
-| `alefs-fuse` | FUSE projection |
+| `alefs-types` | values, codec, paths |
+| `alefs-storage` | storage trait, WAL, compact |
+| `alefs-namespace` | graph, txn, type index |
+| `alefs-query` | AlefQL |
+| `alefs-server` | RPC, daemon lifecycle, client |
+| `alefs-fuse` | FUSE |
 | `alefsdb` | CLI |
-| `alefs-bench` | Multi-client load generator |
+| `alefs-bench` | load generator |
 
-## Design and contributing
+## Design / plans
 
-- Full design: [docs/superpowers/specs/2026-07-09-alefsdb-design.md](docs/superpowers/specs/2026-07-09-alefsdb-design.md)
-- Working conventions: [AGENTS.md](AGENTS.md)
+- [Design](docs/superpowers/specs/2026-07-09-alefsdb-design.md)
+- [P6/P7 plan](docs/superpowers/plans/2026-07-09-alefsdb-p6-p7.md)
+- [AGENTS.md](AGENTS.md)
 
 ## License
 

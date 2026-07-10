@@ -1,7 +1,7 @@
 use crate::error::NsError;
 use crate::keys::{
-    child_key, child_prefix, decode_id, encode_dir_node, encode_id, encode_value_node, meta_next_id,
-    node_key, parse_node, type_index_key, type_index_prefix, NodeRecord, ROOT_ID,
+    child_key, child_prefix, decode_id, encode_dir_node, encode_id, encode_value_node,
+    meta_next_id, node_key, parse_node, type_index_key, type_index_prefix, NodeRecord, ROOT_ID,
 };
 use alefs_storage::{Storage, WriteBatch};
 use alefs_types::{decode, encode, encode_payload, DbPath, Scalar, Value};
@@ -19,7 +19,6 @@ pub struct Entry {
     pub kind: EntryKind,
     pub value: Option<Value>,
 }
-
 
 fn value_type_name(v: &Value) -> &'static str {
     v.typename()
@@ -59,10 +58,8 @@ impl<S: Storage> Database<S> {
         // Rebuild type index when missing/outdated (older data dirs).
         const INDEX_VER: u64 = 1;
         let ver_key = b"meta/type_index_version".as_slice();
-        let needs = match db.store.get(ver_key)? {
-            Some(v) if v.as_slice() == INDEX_VER.to_be_bytes() => false,
-            _ => true,
-        };
+        let needs =
+            !matches!(db.store.get(ver_key)?, Some(v) if v.as_slice() == INDEX_VER.to_be_bytes());
         if needs {
             db.rebuild_type_index()?;
             let mut batch = WriteBatch::new();
@@ -252,7 +249,10 @@ impl<S: Storage> Database<S> {
             let id = self.alloc_id(&mut batch)?;
             batch.put(node_key(id), encode_value_node(&enc));
             batch.put(child_key(parent_id, name), encode_id(id));
-            batch.put(type_index_key(value.typename(), id), path.as_str().into_bytes());
+            batch.put(
+                type_index_key(value.typename(), id),
+                path.as_str().into_bytes(),
+            );
         }
         self.store.commit(batch)?;
         Ok(())
@@ -293,7 +293,7 @@ impl<S: Storage> Database<S> {
             let s = String::from_utf8(v).map_err(|_| NsError::Invalid("idx path utf8".into()))?;
             out.push(DbPath::parse(&s)?);
         }
-        out.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        out.sort_by_key(|a| a.as_str());
         Ok(out)
     }
 
@@ -963,23 +963,23 @@ mod tests {
     }
 }
 
-    #[cfg(test)]
-    mod index_tests {
-        use super::*;
-        use alefs_storage::MemoryStorage;
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+    use alefs_storage::MemoryStorage;
 
-        #[test]
-        fn type_index_lists_paths() {
-            let mut db = Database::open(MemoryStorage::new()).unwrap();
-            db.mkdir(&DbPath::parse("/a").unwrap()).unwrap();
-            db.set(&DbPath::parse("/a/x").unwrap(), Value::int(1))
-                .unwrap();
-            db.set(&DbPath::parse("/a/y").unwrap(), Value::string("s"))
-                .unwrap();
-            let ints = db.paths_with_type("int").unwrap();
-            assert_eq!(ints.len(), 1);
-            assert_eq!(ints[0].as_str(), "/a/x");
-            let strings = db.paths_with_type("string").unwrap();
-            assert!(strings.iter().any(|p| p.as_str() == "/a/y"));
-        }
+    #[test]
+    fn type_index_lists_paths() {
+        let mut db = Database::open(MemoryStorage::new()).unwrap();
+        db.mkdir(&DbPath::parse("/a").unwrap()).unwrap();
+        db.set(&DbPath::parse("/a/x").unwrap(), Value::int(1))
+            .unwrap();
+        db.set(&DbPath::parse("/a/y").unwrap(), Value::string("s"))
+            .unwrap();
+        let ints = db.paths_with_type("int").unwrap();
+        assert_eq!(ints.len(), 1);
+        assert_eq!(ints[0].as_str(), "/a/x");
+        let strings = db.paths_with_type("string").unwrap();
+        assert!(strings.iter().any(|p| p.as_str() == "/a/y"));
     }
+}

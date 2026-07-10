@@ -13,16 +13,29 @@ use std::collections::BTreeMap;
 /// One mutation inside a transaction.
 #[derive(Debug, Clone)]
 pub enum TxnOp {
-    Mkdir { path: DbPath },
-    Set { path: DbPath, value: Value },
-    Delete { path: DbPath },
+    Mkdir {
+        path: DbPath,
+    },
+    Set {
+        path: DbPath,
+        value: Value,
+    },
+    Delete {
+        path: DbPath,
+    },
     HashSet {
         path: DbPath,
         key: String,
         value: Value,
     },
-    ListPush { path: DbPath, value: Value },
-    SetAdd { path: DbPath, value: Value },
+    ListPush {
+        path: DbPath,
+        value: Value,
+    },
+    SetAdd {
+        path: DbPath,
+        value: Value,
+    },
     TreeSet {
         path: DbPath,
         key: Scalar,
@@ -60,7 +73,7 @@ impl<'a, S: Storage> Overlay<'a, S> {
         self.pending.insert(key, None);
     }
 
-    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, NsError> {
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<alefs_storage::ScanRows, NsError> {
         let mut map: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
         for (k, v) in self.store.scan_prefix(prefix)? {
             map.insert(k, v);
@@ -252,11 +265,7 @@ fn mkdir_ov<S: Storage>(ov: &mut Overlay<'_, S>, path: &DbPath) -> Result<(), Ns
     Ok(())
 }
 
-fn set_ov<S: Storage>(
-    ov: &mut Overlay<'_, S>,
-    path: &DbPath,
-    value: Value,
-) -> Result<(), NsError> {
+fn set_ov<S: Storage>(ov: &mut Overlay<'_, S>, path: &DbPath, value: Value) -> Result<(), NsError> {
     if path.is_root() {
         return Err(NsError::Invalid("cannot set value at root".into()));
     }
@@ -297,7 +306,10 @@ fn set_ov<S: Storage>(
         ov.put(meta_next_id(), encode_id(id + 1));
         ov.put(node_key(id), encode_value_node(&enc));
         ov.put(child_key(parent_id, name), encode_id(id));
-        ov.put(type_index_key(value.typename(), id), path.as_str().into_bytes());
+        ov.put(
+            type_index_key(value.typename(), id),
+            path.as_str().into_bytes(),
+        );
     }
     Ok(())
 }
