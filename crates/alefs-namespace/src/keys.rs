@@ -68,3 +68,19 @@ pub enum NodeRecord {
     Dir,
     Value(Vec<u8>),
 }
+
+/// Secondary index: type name → node ids (for query acceleration).
+pub fn type_index_key(type_name: &str, id: u64) -> Vec<u8> {
+    let mut k = b"idx/t/".to_vec();
+    k.extend_from_slice(type_name.as_bytes());
+    k.push(b'/');
+    k.extend_from_slice(&id.to_be_bytes());
+    k
+}
+
+pub fn type_index_prefix(type_name: &str) -> Vec<u8> {
+    let mut k = b"idx/t/".to_vec();
+    k.extend_from_slice(type_name.as_bytes());
+    k.push(b'/');
+    k
+}

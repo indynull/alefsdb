@@ -4,7 +4,7 @@ use crate::db::Database;
 use crate::error::NsError;
 use crate::keys::{
     child_key, child_prefix, decode_id, encode_dir_node, encode_id, encode_value_node,
-    meta_next_id, node_key, parse_node, NodeRecord, ROOT_ID,
+    meta_next_id, node_key, parse_node, type_index_key, NodeRecord, ROOT_ID,
 };
 use alefs_storage::{Storage, WriteBatch};
 use alefs_types::{decode, encode, encode_payload, DbPath, Scalar, Value};
@@ -248,6 +248,7 @@ fn mkdir_ov<S: Storage>(ov: &mut Overlay<'_, S>, path: &DbPath) -> Result<(), Ns
     ov.put(meta_next_id(), encode_id(id + 1));
     ov.put(node_key(id), encode_dir_node());
     ov.put(child_key(parent_id, name), encode_id(id));
+    ov.put(type_index_key("directory", id), path.as_str().into_bytes());
     Ok(())
 }
 
@@ -281,8 +282,14 @@ fn set_ov<S: Storage>(
             .ok_or_else(|| NsError::Invalid("missing node".into()))?;
         match parse_node(&existing).map_err(NsError::Invalid)? {
             NodeRecord::Dir => return Err(NsError::IsDirectory(path.as_str())),
-            NodeRecord::Value(_) => {
+            NodeRecord::Value(old_enc) => {
+                let old_ty = decode(&old_enc)?.typename();
+                let new_ty = value.typename();
+                if old_ty != new_ty {
+                    ov.delete(type_index_key(old_ty, id));
+                }
                 ov.put(node_key(id), encode_value_node(&enc));
+                ov.put(type_index_key(new_ty, id), path.as_str().into_bytes());
             }
         }
     } else {
@@ -290,6 +297,7 @@ fn set_ov<S: Storage>(
         ov.put(meta_next_id(), encode_id(id + 1));
         ov.put(node_key(id), encode_value_node(&enc));
         ov.put(child_key(parent_id, name), encode_id(id));
+        ov.put(type_index_key(value.typename(), id), path.as_str().into_bytes());
     }
     Ok(())
 }
@@ -311,14 +319,15 @@ fn delete_ov<S: Storage>(ov: &mut Overlay<'_, S>, path: &DbPath) -> Result<(), N
     let parent = path.parent().unwrap();
     let name = path.segments().last().unwrap();
     let (parent_id, _) = resolve_ov(ov, &parent)?;
+    let ty = match &rec {
+        NodeRecord::Dir => "directory",
+        NodeRecord::Value(enc) => decode(enc)?.typename(),
+    };
+    ov.delete(type_index_key(ty, id));
     ov.delete(child_key(parent_id, name));
     ov.delete(node_key(id));
     Ok(())
 }
-
-// silence unused import warnings for Entry if not used
-#[allow(dead_code)]
-fn _entry_kind(_: EntryKind, _: Entry) {}
 
 #[cfg(test)]
 mod tests {

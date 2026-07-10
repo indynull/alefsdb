@@ -23,7 +23,7 @@ impl std::error::Error for EvalError {}
 
 pub fn execute<S: Storage>(db: &Database<S>, query: &str) -> Result<Vec<QueryHit>, EvalError> {
     let expr = parse_query(query).map_err(EvalError::Parse)?;
-    let candidates = all_entries(db).map_err(|e| EvalError::Ns(e.to_string()))?;
+    let candidates = candidates_for(db, &expr).map_err(|e| EvalError::Ns(e.to_string()))?;
     let mut hits = Vec::new();
     for (path, kind, value) in candidates {
         if eval_expr(&expr, &path, kind, value.as_ref()) {
@@ -36,6 +36,34 @@ pub fn execute<S: Storage>(db: &Database<S>, query: &str) -> Result<Vec<QueryHit
         }
     }
     Ok(hits)
+}
+
+/// If the expression AND-chain implies a concrete type, use the type index.
+fn required_concrete_type(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Pred(Predicate::TypeName(t)) if t != "scalar" => Some(t.as_str()),
+        Expr::And(a, b) => match (required_concrete_type(a), required_concrete_type(b)) {
+            (Some(t), None) | (None, Some(t)) => Some(t),
+            (Some(t1), Some(t2)) if t1 == t2 => Some(t1),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn candidates_for<S: Storage>(
+    db: &Database<S>,
+    expr: &Expr,
+) -> Result<Vec<(DbPath, EntryKind, Option<Value>)>, alefs_namespace::NsError> {
+    if let Some(ty) = required_concrete_type(expr) {
+        let mut out = Vec::new();
+        for path in db.paths_with_type(ty)? {
+            let entry = db.get(&path)?;
+            out.push((path, entry.kind, entry.value));
+        }
+        return Ok(out);
+    }
+    all_entries(db)
 }
 
 fn type_label(v: &Value) -> String {

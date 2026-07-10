@@ -1,7 +1,7 @@
 use crate::error::NsError;
 use crate::keys::{
-    child_key, child_prefix, decode_id, encode_dir_node, encode_id, encode_value_node,
-    meta_next_id, node_key, parse_node, NodeRecord, ROOT_ID,
+    child_key, child_prefix, decode_id, encode_dir_node, encode_id, encode_value_node, meta_next_id,
+    node_key, parse_node, type_index_key, type_index_prefix, NodeRecord, ROOT_ID,
 };
 use alefs_storage::{Storage, WriteBatch};
 use alefs_types::{decode, encode, encode_payload, DbPath, Scalar, Value};
@@ -20,6 +20,21 @@ pub struct Entry {
     pub value: Option<Value>,
 }
 
+
+fn value_type_name(v: &Value) -> &'static str {
+    v.typename()
+}
+
+fn node_type_name(rec: &NodeRecord) -> Result<&'static str, NsError> {
+    match rec {
+        NodeRecord::Dir => Ok("directory"),
+        NodeRecord::Value(enc) => {
+            let v = decode(enc)?;
+            Ok(value_type_name(&v))
+        }
+    }
+}
+
 /// Database over any [`Storage`].
 pub struct Database<S: Storage> {
     store: S,
@@ -32,6 +47,7 @@ impl<S: Storage> Database<S> {
             let mut batch = WriteBatch::new();
             batch.put(node_key(ROOT_ID), encode_dir_node());
             batch.put(meta_next_id(), encode_id(ROOT_ID + 1));
+            batch.put(type_index_key("directory", ROOT_ID), b"/".to_vec());
             store.commit(batch)?;
         } else if store.get(&meta_next_id())?.is_none() {
             // Recover next id if missing (shouldn't happen).
@@ -39,7 +55,44 @@ impl<S: Storage> Database<S> {
             batch.put(meta_next_id(), encode_id(ROOT_ID + 1));
             store.commit(batch)?;
         }
-        Ok(Self { store })
+        let mut db = Self { store };
+        // Rebuild type index when missing/outdated (older data dirs).
+        const INDEX_VER: u64 = 1;
+        let ver_key = b"meta/type_index_version".as_slice();
+        let needs = match db.store.get(ver_key)? {
+            Some(v) if v.as_slice() == INDEX_VER.to_be_bytes() => false,
+            _ => true,
+        };
+        if needs {
+            db.rebuild_type_index()?;
+            let mut batch = WriteBatch::new();
+            batch.put(ver_key, INDEX_VER.to_be_bytes().to_vec());
+            db.store.commit(batch)?;
+        }
+        Ok(db)
+    }
+
+    /// Walk the namespace and rewrite `idx/t/*` secondary indexes.
+    pub fn rebuild_type_index(&mut self) -> Result<(), NsError> {
+        // Delete existing type index keys.
+        let mut batch = WriteBatch::new();
+        for (k, _) in self.store.scan_prefix(b"idx/t/")? {
+            batch.delete(k);
+        }
+        // Walk and re-insert.
+        let mut stack = vec![DbPath::root()];
+        while let Some(path) = stack.pop() {
+            let (id, rec) = self.resolve(&path)?;
+            let ty = node_type_name(&rec)?;
+            batch.put(type_index_key(ty, id), path.as_str().into_bytes());
+            if matches!(rec, NodeRecord::Dir) {
+                for (name, _) in self.list(&path)? {
+                    stack.push(path.join(&name)?);
+                }
+            }
+        }
+        self.store.commit(batch)?;
+        Ok(())
     }
 
     pub fn store(&self) -> &S {
@@ -147,6 +200,7 @@ impl<S: Storage> Database<S> {
         let id = self.alloc_id(&mut batch)?;
         batch.put(node_key(id), encode_dir_node());
         batch.put(child_key(parent_id, name), encode_id(id));
+        batch.put(type_index_key("directory", id), path.as_str().into_bytes());
         self.store.commit(batch)?;
         Ok(())
     }
@@ -184,14 +238,21 @@ impl<S: Storage> Database<S> {
                 .ok_or_else(|| NsError::Invalid("missing node".into()))?;
             match parse_node(&existing).map_err(NsError::Invalid)? {
                 NodeRecord::Dir => return Err(NsError::IsDirectory(path.as_str())),
-                NodeRecord::Value(_) => {
+                NodeRecord::Value(old_enc) => {
+                    let old_ty = decode(&old_enc)?.typename();
+                    let new_ty = value.typename();
+                    if old_ty != new_ty {
+                        batch.delete(type_index_key(old_ty, id));
+                    }
                     batch.put(node_key(id), encode_value_node(&enc));
+                    batch.put(type_index_key(new_ty, id), path.as_str().into_bytes());
                 }
             }
         } else {
             let id = self.alloc_id(&mut batch)?;
             batch.put(node_key(id), encode_value_node(&enc));
             batch.put(child_key(parent_id, name), encode_id(id));
+            batch.put(type_index_key(value.typename(), id), path.as_str().into_bytes());
         }
         self.store.commit(batch)?;
         Ok(())
@@ -216,10 +277,24 @@ impl<S: Storage> Database<S> {
         let (parent_id, _) = self.resolve(&parent)?;
 
         let mut batch = WriteBatch::new();
+        let ty = node_type_name(&rec)?;
+        batch.delete(type_index_key(ty, id));
         batch.delete(child_key(parent_id, name));
         batch.delete(node_key(id));
         self.store.commit(batch)?;
         Ok(())
+    }
+
+    /// Paths of all value/dir nodes with the given type name (secondary index).
+    pub fn paths_with_type(&self, type_name: &str) -> Result<Vec<DbPath>, NsError> {
+        let rows = self.store.scan_prefix(&type_index_prefix(type_name))?;
+        let mut out = Vec::new();
+        for (_k, v) in rows {
+            let s = String::from_utf8(v).map_err(|_| NsError::Invalid("idx path utf8".into()))?;
+            out.push(DbPath::parse(&s)?);
+        }
+        out.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        Ok(out)
     }
 
     /// List directory children as (name, kind).
@@ -887,3 +962,24 @@ mod tests {
         );
     }
 }
+
+    #[cfg(test)]
+    mod index_tests {
+        use super::*;
+        use alefs_storage::MemoryStorage;
+
+        #[test]
+        fn type_index_lists_paths() {
+            let mut db = Database::open(MemoryStorage::new()).unwrap();
+            db.mkdir(&DbPath::parse("/a").unwrap()).unwrap();
+            db.set(&DbPath::parse("/a/x").unwrap(), Value::int(1))
+                .unwrap();
+            db.set(&DbPath::parse("/a/y").unwrap(), Value::string("s"))
+                .unwrap();
+            let ints = db.paths_with_type("int").unwrap();
+            assert_eq!(ints.len(), 1);
+            assert_eq!(ints[0].as_str(), "/a/x");
+            let strings = db.paths_with_type("string").unwrap();
+            assert!(strings.iter().any(|p| p.as_str() == "/a/y"));
+        }
+    }
