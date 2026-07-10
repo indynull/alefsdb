@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Ping,
+    Stats,
     Mkdir {
         path: String,
     },
@@ -57,18 +58,43 @@ pub enum Request {
     Import {
         json: String,
     },
+    /// Atomic multi-op transaction (single WAL commit).
+    Batch {
+        ops: Vec<Request>,
+    },
 }
 
 /// Server → client response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
-    Ok { message: String },
-    Value { type_name: String, display: String },
-    List { entries: Vec<ListEntry> },
-    Query { hits: Vec<QueryHitDto> },
-    Export { json: String },
-    Err { message: String },
+    Ok {
+        message: String,
+    },
+    Value {
+        type_name: String,
+        display: String,
+    },
+    List {
+        entries: Vec<ListEntry>,
+    },
+    Query {
+        hits: Vec<QueryHitDto>,
+    },
+    Export {
+        json: String,
+    },
+    Stats {
+        uptime_sec: u64,
+        requests: u64,
+        mutations: u64,
+        queries: u64,
+        errors: u64,
+        keys_approx: u64,
+    },
+    Err {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

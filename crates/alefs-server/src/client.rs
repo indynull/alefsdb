@@ -1,7 +1,7 @@
 use crate::handle::{read_message, write_message, ServeError};
 use crate::protocol::{Request, Response};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -36,27 +36,49 @@ impl From<std::io::Error> for ClientError {
 
 /// One-shot RPC: connect, send request, read response, disconnect.
 pub fn rpc_call(socket: impl AsRef<Path>, request: Request) -> Result<Response, ClientError> {
-    let mut stream = UnixStream::connect(socket.as_ref())?;
-    let payload = serde_json::to_vec(&request).map_err(|e| ClientError::Protocol(e.to_string()))?;
-    write_message(&mut stream, &payload)?;
-    let resp_bytes = read_message(&mut stream)?
-        .ok_or_else(|| ClientError::Protocol("server closed without response".into()))?;
-    let response: Response =
-        serde_json::from_slice(&resp_bytes).map_err(|e| ClientError::Protocol(e.to_string()))?;
-    Ok(response)
+    let mut c = Client::connect(socket)?;
+    c.call(request)
+}
+
+/// Persistent connection for multi-request sessions (bench, tooling).
+pub struct Client {
+    stream: UnixStream,
+    path: PathBuf,
+}
+
+impl Client {
+    pub fn connect(socket: impl AsRef<Path>) -> Result<Self, ClientError> {
+        let path = socket.as_ref().to_path_buf();
+        let stream = UnixStream::connect(&path)?;
+        Ok(Self { stream, path })
+    }
+
+    pub fn call(&mut self, request: Request) -> Result<Response, ClientError> {
+        let payload =
+            serde_json::to_vec(&request).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        write_message(&mut self.stream, &payload)?;
+        let resp_bytes = read_message(&mut self.stream)?
+            .ok_or_else(|| ClientError::Protocol("server closed without response".into()))?;
+        let response: Response = serde_json::from_slice(&resp_bytes)
+            .map_err(|e| ClientError::Protocol(e.to_string()))?;
+        Ok(response)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handle::{default_socket_path, open_db, serve_listener};
+    use crate::handle::{default_socket_path, open_daemon, serve_daemon};
     use crate::protocol::Request;
-    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn client_roundtrip_over_socket() {
+    fn persistent_client_multi_call() {
         let mut dir = std::env::temp_dir();
         dir.push(format!(
             "alefs-cli-{}-{}",
@@ -69,36 +91,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let sock = default_socket_path(&dir);
-        let db = open_db(&dir).unwrap();
+        let daemon = open_daemon(&dir).unwrap();
+        let shutdown = std::sync::Arc::clone(&daemon.shutdown);
         let sock_c = sock.clone();
         let handle = thread::spawn(move || {
-            let _ = serve_listener(db, sock_c);
+            let _ = serve_daemon(daemon, sock_c);
         });
-        // Wait for bind
         for _ in 0..50 {
             if sock.exists() {
                 break;
             }
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(20));
         }
-        let r = rpc_call(
-            &sock,
-            Request::Set {
+        let mut c = Client::connect(&sock).unwrap();
+        let r = c
+            .call(Request::Set {
                 path: "/x".into(),
                 type_name: "int".into(),
                 value: "7".into(),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert!(matches!(r, Response::Ok { .. }), "{r:?}");
-        let r = rpc_call(&sock, Request::Get { path: "/x".into() }).unwrap();
+        let r = c.call(Request::Get { path: "/x".into() }).unwrap();
         match r {
             Response::Value { display, .. } => assert_eq!(display, "7"),
             other => panic!("{other:?}"),
         }
-        // Dropping socket file won't stop server thread easily; just leave it.
-        let _ = handle;
+        let r = c.call(Request::Stats).unwrap();
+        assert!(matches!(r, Response::Stats { .. }), "{r:?}");
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(100));
+        let _ = handle.join();
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = Arc::new(()); // silence
     }
 }
