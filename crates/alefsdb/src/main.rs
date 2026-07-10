@@ -1,11 +1,12 @@
 use alefs_server::{
-    default_socket_path, dispatch, open_db, rpc_call, serve_listener, Request, Response,
+    default_socket_path, dispatch, open_daemon, open_db, rpc_call, serve_daemon, Request, Response,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::thread;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(name = "alefsdb", about = "Typed structure DB + filesystem")]
@@ -26,6 +27,23 @@ enum Cmd {
         /// Optional FUSE mount point
         #[arg(long)]
         mount: Option<PathBuf>,
+    },
+    /// Server stats (requires running daemon, or --direct)
+    Stats {
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        direct: bool,
+    },
+    /// Atomic multi-op transaction: JSON array of request objects
+    Txn {
+        #[arg(long)]
+        data: PathBuf,
+        /// Path to JSON file containing an array of ops
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        direct: bool,
     },
     /// Create a directory entry (parents must exist)
     Mkdir {
@@ -149,6 +167,10 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_writer(std::io::stderr)
+        .try_init();
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
         eprintln!("error: {e}");
@@ -165,19 +187,26 @@ fn run(cli: Cli) -> Result<(), String> {
             mount,
         } => {
             let sock = socket.unwrap_or_else(|| default_socket_path(&data));
-            let db = open_db(&data).map_err(|e| e.to_string())?;
+            let daemon = open_daemon(&data).map_err(|e| e.to_string())?;
             if let Some(mnt) = mount {
-                let db_fuse = Arc::clone(&db);
+                let db_fuse = Arc::clone(&daemon.db);
                 let mnt_c = mnt.clone();
                 thread::spawn(move || {
                     if let Err(e) = alefs_fuse::mount_shared(db_fuse, &mnt_c) {
-                        eprintln!("fuse error: {e}");
+                        tracing::error!(error = %e, "fuse error");
                     }
                 });
-                eprintln!("fuse mounting at {}", mnt.display());
+                tracing::info!(path = %mnt.display(), "fuse mounting");
             }
-            serve_listener(db, sock).map_err(|e| e.to_string())?;
+            serve_daemon(daemon, sock).map_err(|e| e.to_string())?;
             Ok(())
+        }
+        Cmd::Stats { data, direct } => print_resp(call(&data, direct, Request::Stats)?),
+        Cmd::Txn { data, file, direct } => {
+            let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+            let ops: Vec<Request> =
+                serde_json::from_str(&text).map_err(|e| format!("txn json: {e}"))?;
+            print_resp(call(&data, direct, Request::Batch { ops })?)
         }
         Cmd::Mkdir { data, path, direct } => {
             print_resp(call(&data, direct, Request::Mkdir { path })?)
@@ -327,6 +356,22 @@ fn print_resp(resp: Response) -> Result<(), String> {
         }
         Response::Export { json } => {
             println!("{json}");
+            Ok(())
+        }
+        Response::Stats {
+            uptime_sec,
+            requests,
+            mutations,
+            queries,
+            errors,
+            keys_approx,
+        } => {
+            println!("uptime_sec={uptime_sec}");
+            println!("requests={requests}");
+            println!("mutations={mutations}");
+            println!("queries={queries}");
+            println!("errors={errors}");
+            println!("keys_approx={keys_approx}");
             Ok(())
         }
         Response::Err { message } => Err(message),

@@ -1,12 +1,6 @@
 //! memtier-inspired load generator for alefsdb (Unix socket or direct open).
-//!
-//! Example:
-//! ```text
-//! alefsdb serve --data ./data &
-//! alefs-bench --data ./data --clients 4 --requests 10000 --ratio 1:10
-//! ```
 
-use alefs_server::{default_socket_path, dispatch, open_db, rpc_call, Request, Response};
+use alefs_server::{default_socket_path, dispatch, open_db, Client, Request, Response};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,41 +14,22 @@ use std::time::{Duration, Instant};
     about = "Load generator for alefsdb (SET/GET mix, multi-client)"
 )]
 struct Args {
-    /// Data directory (socket at <data>/alefs.sock when present)
     #[arg(long)]
     data: PathBuf,
-
-    /// Force direct open (ignore daemon socket)
     #[arg(long)]
     direct: bool,
-
-    /// Concurrent clients (threads)
     #[arg(long, default_value_t = 4)]
     clients: usize,
-
-    /// Total requests across all clients
     #[arg(long, default_value_t = 10_000)]
     requests: u64,
-
-    /// SET:GET ratio as set:get (e.g. 1:10)
     #[arg(long, default_value = "1:10")]
     ratio: String,
-
-    /// Keyspace size for random keys
     #[arg(long, default_value_t = 1000)]
     keyspace: u64,
-
-    /// Prefix path for keys (directory must exist or be /)
     #[arg(long, default_value = "/bench")]
     prefix: String,
-
-    /// Warm-up: create prefix dir and a few keys
     #[arg(long, default_value_t = true)]
     warmup: bool,
-
-    /// Pipeline: requests per connection batch before reconnect (1 = one-shot RPC)
-    #[arg(long, default_value_t = 1)]
-    pipeline: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -99,16 +74,15 @@ fn run(args: Args) -> Result<(), String> {
     }
 
     if args.warmup {
-        call(
+        one_call(
             &args.data,
             use_socket,
             Request::Mkdir {
                 path: args.prefix.clone(),
             },
         )?;
-        // ignore already exists
         for i in 0..args.keyspace.min(16) {
-            let _ = call(
+            let _ = one_call(
                 &args.data,
                 use_socket,
                 Request::Set {
@@ -136,47 +110,65 @@ fn run(args: Args) -> Result<(), String> {
         let sets = Arc::clone(&sets);
         let gets = Arc::clone(&gets);
         let keyspace = args.keyspace.max(1);
-        let pipeline = args.pipeline.max(1);
+        let sock_path = sock.clone();
         handles.push(thread::spawn(move || {
             let mut latencies = Vec::with_capacity(n as usize);
-            let mut i = 0u64;
-            while i < n {
-                let batch = pipeline.min((n - i) as usize);
-                for b in 0..batch {
-                    let seq = i + b as u64;
-                    let key_id = (c as u64 * 1_000_000 + seq) % keyspace;
-                    let path = format!("{prefix}/k{key_id}");
-                    let do_set = is_set(seq, ratio);
-                    let req = if do_set {
-                        sets.fetch_add(1, Ordering::Relaxed);
-                        Request::Set {
-                            path,
-                            type_name: "string".into(),
-                            value: format!("v{seq}"),
+            // Persistent client when on socket.
+            let mut client = if use_socket {
+                Some(Client::connect(&sock_path).ok())
+            } else {
+                None
+            };
+            for seq in 0..n {
+                let key_id = (c as u64 * 1_000_000 + seq) % keyspace;
+                let path = format!("{prefix}/k{key_id}");
+                let do_set = is_set(seq, ratio);
+                let req = if do_set {
+                    sets.fetch_add(1, Ordering::Relaxed);
+                    Request::Set {
+                        path,
+                        type_name: "string".into(),
+                        value: format!("v{seq}"),
+                    }
+                } else {
+                    gets.fetch_add(1, Ordering::Relaxed);
+                    Request::Get { path }
+                };
+                let t0 = Instant::now();
+                let result = if let Some(Some(ref mut cl)) = client.as_mut() {
+                    cl.call(req.clone()).map_err(|e| e.to_string())
+                } else if use_socket {
+                    // reconnect
+                    match Client::connect(&sock_path) {
+                        Ok(mut cl) => {
+                            let r = cl.call(req).map_err(|e| e.to_string());
+                            client = Some(Some(cl));
+                            r
                         }
-                    } else {
-                        gets.fetch_add(1, Ordering::Relaxed);
-                        Request::Get { path }
-                    };
-                    let t0 = Instant::now();
-                    match call(&data, use_socket, req) {
-                        Ok(Response::Ok { .. }) | Ok(Response::Value { .. }) => {
-                            latencies.push(t0.elapsed());
-                        }
-                        Ok(Response::Err { .. }) | Err(_) => {
-                            // get missing key is ok-ish for workload; count only hard errors
-                            if do_set {
-                                errors.fetch_add(1, Ordering::Relaxed);
-                            } else {
-                                latencies.push(t0.elapsed());
-                            }
-                        }
-                        Ok(_) => {
+                        Err(e) => Err(e.to_string()),
+                    }
+                } else {
+                    match open_db(&data) {
+                        Ok(db) => Ok(dispatch(&db, req)),
+                        Err(e) => Err(e.to_string()),
+                    }
+                };
+                match result {
+                    Ok(Response::Ok { .. }) | Ok(Response::Value { .. }) => {
+                        latencies.push(t0.elapsed());
+                    }
+                    Ok(Response::Err { .. }) if !do_set => {
+                        latencies.push(t0.elapsed());
+                    }
+                    Ok(Response::Err { .. }) | Err(_) => {
+                        if do_set {
+                            errors.fetch_add(1, Ordering::Relaxed);
+                        } else {
                             latencies.push(t0.elapsed());
                         }
                     }
+                    Ok(_) => latencies.push(t0.elapsed()),
                 }
-                i += batch as u64;
             }
             latencies
         }));
@@ -238,9 +230,10 @@ fn percentile(sorted: &[Duration], p: u32) -> Duration {
     sorted[idx]
 }
 
-fn call(data: &PathBuf, use_socket: bool, req: Request) -> Result<Response, String> {
+fn one_call(data: &PathBuf, use_socket: bool, req: Request) -> Result<Response, String> {
     if use_socket {
-        rpc_call(default_socket_path(data), req).map_err(|e| e.to_string())
+        let mut c = Client::connect(default_socket_path(data)).map_err(|e| e.to_string())?;
+        c.call(req).map_err(|e| e.to_string())
     } else {
         let db = open_db(data).map_err(|e| e.to_string())?;
         Ok(dispatch(&db, req))
